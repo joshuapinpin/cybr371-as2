@@ -14,7 +14,7 @@ REDIRECT_URI = 'http://localhost/client/callback'
 TOKEN_ENDPOINT = 'http://localhost/oauth/token'
 AUTHORIZE_ENDPOINT = '/oauth/authorize'
 
-PKCE_METHOD = 'plain'
+PKCE_METHOD = 'S256'
 
 
 @client_bp.route('/login')
@@ -59,11 +59,18 @@ def callback():
     if not code:
         return jsonify({'error': 'missing_code'}), 400
 
+    # Validate state parameter (CSRF protection)
+    stored_state = session.get('state')
+    if not state or state != stored_state:
+        return jsonify({'error': 'invalid_state'}), 400
+
+    code_verifier = session.get('code_verifier')
     token_response = requests.post(TOKEN_ENDPOINT, data={
         'grant_type': 'authorization_code',
         'code': code,
         'redirect_uri': REDIRECT_URI,
         'client_id': CLIENT_ID,
+        'code_verifier': code_verifier,  # Include PKCE verifier
     })
 
     if token_response.status_code != 200:
@@ -77,29 +84,32 @@ def callback():
         return jsonify({'error': 'missing_id_token'}), 400
 
     try:
-        header = jwt.get_unverified_header(id_token_str)
-        alg = header.get('alg', 'RS256')
-        if alg == 'none':
-            id_token = jwt.decode(
-                id_token_str,
-                '',
-                algorithms=['none'],
-                options={'verify_signature': False, 'verify_aud': False},
-            )
-        else:
-            id_token = jwt.decode(
-                id_token_str,
-                current_app.public_key,
-                algorithms=[alg],
-                options={'verify_aud': False},
-            )
+        # 1: Hardcode algorithm (never read from token header)
+        # 2: Validate audience matches client_id
+        # 3: Validate nonce to prevent replay attacks
+        id_token = jwt.decode(
+            id_token_str,
+            current_app.public_key,
+            algorithms=['RS256'],
+            audience=CLIENT_ID,
+            options={'require': ['nonce']},
+        )
+
+        # Verify nonce matches the one stored in session
+        stored_nonce = session.get('nonce')
+        if id_token.get('nonce') != stored_nonce:
+            return jsonify({'error': 'invalid_nonce'}), 401
     except jwt.PyJWTError:
         return jsonify({'error': 'invalid_id_token'}), 401
 
     session['access_token'] = access_token
 
+    # Validate redirect URL is safe (same-origin only)
     next_url = session.pop('next', None)
     if next_url:
+        # Only allow relative paths starting with / but not //
+        if not next_url.startswith('/') or next_url.startswith('//'):
+            return jsonify({'error': 'invalid_redirect'}), 400
         return redirect(next_url)
 
     return jsonify({'status': 'login successful', 'sub': id_token.get('sub')}), 200

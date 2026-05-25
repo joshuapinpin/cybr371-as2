@@ -34,4 +34,9 @@ def photos():
     except jwt.PyJWTError:
         return jsonify({'error': 'invalid_token'}), 401
 
+    # Validate that the required scope is present
+    scope = payload.get('scope', '')
+    if REQUIRED_SCOPE not in scope.split():
+        return jsonify({'error': 'insufficient_scope'}), 403
+
     return jsonify({'photos': PHOTOS})
